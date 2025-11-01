@@ -14,7 +14,9 @@ from functools import partial, update_wrapper
 # hence we overwrite the iter to make sure that the error makes sense.
 class no_iter_partial(partial):
     def __iter__(self):
-        raise TypeError("Nothing to iterate over. Please pass an iterable to reloading.")
+        raise TypeError(
+            "Nothing to iterate over. Please pass an iterable to reloading."
+        )
 
 
 def reloading(fn_or_seq=None, every=1, forever=None):
@@ -42,6 +44,8 @@ def reloading(fn_or_seq=None, every=1, forever=None):
     if fn_or_seq:
         if isinstance(fn_or_seq, types.FunctionType):
             return _reloading_function(fn_or_seq, every=every)
+        if isinstance(fn_or_seq, type):
+            return _reloading_class(fn_or_seq, every=every)
         return _reloading_loop(fn_or_seq, every=every)
     if forever:
         return _reloading_loop(iter(int, 1), every=every)
@@ -78,7 +82,7 @@ def format_itervars(ast_node):
 def load_file(path):
     src = ""
     # while loop here since while saving, the file may sometimes be empty.
-    while (src == ""):
+    while src == "":
         with open(path, "r") as f:
             src = f.read()
     return src + "\n"
@@ -105,10 +109,10 @@ def isolate_loop_body_and_get_itervars(tree, lineno, loop_id):
             and isinstance(node.iter, ast.Call)
             and node.iter.func.id == "reloading"
             and (
-                    (loop_id is not None and loop_id == get_loop_id(node))
-                    or getattr(node, "lineno", None) == lineno
-                )
-            ):
+                (loop_id is not None and loop_id == get_loop_id(node))
+                or getattr(node, "lineno", None) == lineno
+            )
+        ):
             candidate_nodes.append(node)
 
     if len(candidate_nodes) > 1:
@@ -127,8 +131,7 @@ def isolate_loop_body_and_get_itervars(tree, lineno, loop_id):
 
 
 def get_loop_id(ast_node):
-    """Generates a unique identifier for an `ast_node` of type ast.For to find the loop in the changed source file
-    """
+    """Generates a unique identifier for an `ast_node` of type ast.For to find the loop in the changed source file"""
     return ast.dump(ast_node.target) + "__" + ast.dump(ast_node.iter)
 
 
@@ -137,8 +140,14 @@ def get_loop_code(loop_frame_info, loop_id):
     while True:
         tree = parse_file_until_successful(fpath)
         try:
-            itervars, found_loop_id = isolate_loop_body_and_get_itervars(tree, lineno=loop_frame_info[2], loop_id=loop_id)
-            return compile(tree, filename="", mode="exec"), format_itervars(itervars), found_loop_id
+            itervars, found_loop_id = isolate_loop_body_and_get_itervars(
+                tree, lineno=loop_frame_info[2], loop_id=loop_id
+            )
+            return (
+                compile(tree, filename=fpath, mode="exec"),
+                format_itervars(itervars),
+                found_loop_id,
+            )
         except LookupError:
             handle_exception(fpath)
 
@@ -165,7 +174,9 @@ def _reloading_loop(seq, every=1):
 
     for i, itervar_values in enumerate(seq):
         if i % every == 0:
-            compiled_body, itervars, loop_id = get_loop_code(loop_frame_info, loop_id=loop_id)
+            compiled_body, itervars, loop_id = get_loop_code(
+                loop_frame_info, loop_id=loop_id
+            )
 
         caller_locals[unique] = itervar_values
         exec(itervars + " = " + unique, caller_globals, caller_locals)
@@ -191,9 +202,9 @@ def get_decorator_name_or_none(dec_node):
 
 def strip_reloading_decorator(func):
     """Remove the 'reloading' decorator and all decorators before it"""
-    decorator_names = [get_decorator_name(dec) for dec in func.decorator_list]
+    decorator_names = [get_decorator_name_or_none(dec) for dec in func.decorator_list]
     reloading_idx = decorator_names.index("reloading")
-    func.decorator_list = func.decorator_list[reloading_idx + 1:]
+    func.decorator_list = func.decorator_list[reloading_idx + 1 :]
 
 
 def isolate_function_def(funcname, tree):
@@ -203,13 +214,11 @@ def isolate_function_def(funcname, tree):
         if (
             isinstance(node, ast.FunctionDef)
             and node.name == funcname
-            and "reloading" in [
-                get_decorator_name_or_none(dec)
-                for dec in node.decorator_list
-            ]
+            and "reloading"
+            in [get_decorator_name_or_none(dec) for dec in node.decorator_list]
         ):
             strip_reloading_decorator(node)
-            tree.body = [ node ]
+            tree.body = [node]
             return True
     return False
 
@@ -219,7 +228,7 @@ def get_function_def_code(fpath, fn):
     found = isolate_function_def(fn.__name__, tree)
     if not found:
         return None
-    compiled = compile(tree, filename="", mode="exec")
+    compiled = compile(tree, filename=fpath, mode="exec")
     return compiled
 
 
@@ -249,7 +258,10 @@ def _reloading_function(fn, every=1):
 
     def wrapped(*args, **kwargs):
         if state["reloads"] % every == 0:
-            state["func"] = get_reloaded_function(caller_globals, caller_locals, fpath, fn) or state["func"]
+            state["func"] = (
+                get_reloaded_function(caller_globals, caller_locals, fpath, fn)
+                or state["func"]
+            )
         state["reloads"] += 1
         while True:
             try:
@@ -257,7 +269,99 @@ def _reloading_function(fn, every=1):
                 return result
             except Exception:
                 handle_exception(fpath)
-                state["func"] = get_reloaded_function(caller_globals, caller_locals, fpath, fn) or state["func"]
+                state["func"] = (
+                    get_reloaded_function(caller_globals, caller_locals, fpath, fn)
+                    or state["func"]
+                )
 
     caller_locals[fn.__name__] = wrapped
     return wrapped
+
+
+def isolate_class_def(classname, tree):
+    """Strip everything but the class definition from the ast in-place.
+    Also strips the reloading decorator from the class definition"""
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.ClassDef)
+            and node.name == classname
+            and "reloading"
+            in [get_decorator_name_or_none(dec) for dec in node.decorator_list]
+        ):
+            strip_reloading_decorator(node)
+            tree.body = [node]
+            return True
+    return False
+
+
+def get_class_def_code(fpath, cls):
+    tree = parse_file_until_successful(fpath)
+    found = isolate_class_def(cls.__name__, tree)
+    if not found:
+        return None
+    compiled = compile(tree, filename=fpath, mode="exec")
+    return compiled
+
+
+def get_reloaded_class(caller_globals, caller_locals, fpath, cls):
+    code = get_class_def_code(fpath, cls)
+    if code is None:
+        return None
+    # need to copy locals, otherwise the exec will overwrite the decorated symbol
+    caller_locals_copy = caller_locals.copy()
+    exec(code, caller_globals, caller_locals_copy)
+    new_cls = caller_locals_copy[cls.__name__]
+    return new_cls
+
+
+def _update_class_in_place(target_cls, source_cls):
+    """Copy attributes from source_cls into target_cls, excluding internal slots.
+    This updates methods/attributes so existing instances see new behavior."""
+    exclude = {
+        "__dict__",
+        "__weakref__",
+        "__module__",
+        "__doc__",
+        "__mro__",
+        "__bases__",
+        "__class__",
+        "__qualname__",
+        "__getattribute__",
+    }
+    for name, value in source_cls.__dict__.items():
+        if name in exclude:
+            continue
+        setattr(target_cls, name, value)
+
+
+def _reloading_class(cls, every=1):
+    stack = inspect.stack()
+    frame, fpath = stack[2][:2]
+    caller_locals = frame.f_locals
+    caller_globals = frame.f_globals
+
+    state = {
+        "accesses": 0,
+        "reloads": 0,
+    }
+
+    original_getattribute = getattr(cls, "__getattribute__", object.__getattribute__)
+
+    def __reloading_getattribute__(self, name):
+        if state["accesses"] % every == 0:
+            try:
+                new_cls = (
+                    get_reloaded_class(caller_globals, caller_locals, fpath, cls)
+                    or None
+                )
+                if new_cls is not None:
+                    _update_class_in_place(cls, new_cls)
+                state["reloads"] += 1
+            except Exception:
+                handle_exception(fpath)
+        state["accesses"] += 1
+        return original_getattribute(self, name)
+
+    setattr(cls, "__getattribute__", __reloading_getattribute__)
+    caller_locals[cls.__name__] = cls
+    return cls
